@@ -1,0 +1,210 @@
+#!/usr/bin/perl -w
+
+use strict;
+use warnings;
+use Getopt::Std;
+use File::Basename;
+use Cwd 'abs_path';
+
+my $version = "0.0.3";
+
+my %opts = (d => 5,
+            r => 5);
+
+getopts('d:r:', \%opts);
+&usage if (-t STDIN && @ARGV != 5);
+
+my  $bed            =  shift @ARGV;
+my  $vann           =  shift @ARGV;
+my  $kegg           =  shift @ARGV;
+my  $pfam           =  shift @ARGV;
+my  $project_home   =  shift @ARGV;
+
+my  $runs           =  qq{$project_home/runs};
+my  $report         =  qq{$project_home/report};
+my  $dbscan         =  qq{$project_home/dbscan};
+
+my  $binaries       =  dirname( abs_path($0) ) . '/binaries';
+my  $db             =  dirname( abs_path($0) ) . '/db';
+
+# DBSCAN parameters
+my  $distance       =  $opts{d};
+my  $region         =  $opts{r};
+
+submit();
+exit;
+
+sub submit {
+
+    make_fs();
+    dbscan_run();
+    annotation_run();
+    auxiliary_run();
+}
+
+sub make_fs {
+
+    my $cmd = qq{mkdir -p $report
+                          $runs
+                          $dbscan};
+       $cmd =~ s/\n\s+/ /msg;
+    system $cmd;
+
+}
+
+
+sub dbscan_run {
+
+    my $sh = qq{$runs/dbscan.sh};
+    open (EXPORT, ">$sh") || die "[ERR]: can't open $sh $!\n";
+
+    print EXPORT dbscan();
+    print EXPORT label();
+
+    close EXPORT;
+    system qq{bash $sh};
+}
+
+sub dbscan {
+
+    my $cmd = qq{cut -f1 $vann                             \
+                |$binaries/range-tk enrich                 \
+                    -d $opts{d}                            \
+                    -r $opts{r}                            \
+                    $bed                                   \
+                    -                                      \
+                >$dbscan/cluster.bed;\n};
+       $cmd =~ s/\s+\n\s+/ /msg;
+    return $cmd;
+
+}
+
+sub label {
+
+    my $cmd = qq{bedtools intersect                        \
+                    -loj                                   \
+                    -a $bed                                \
+                    -b $dbscan/cluster.bed                 \
+                |cut -f1,4,10                              \
+                |tsv-utils add_headline                    \
+                    \"#vtig\\tprotein_id\\tcluster_id\"    \
+                    -                                      \
+                >$dbscan/label.tsv;\n};
+       $cmd =~ s/\s+\n\s+/ /msg;
+    return $cmd;
+
+}
+
+sub annotation_run {
+
+    my $sh = qq{$runs/annotation.sh};
+    open (EXPORT, ">$sh") || die "[ERR]: can't open $sh $!\n";
+
+    print EXPORT kofam();
+    print EXPORT pfam();
+    print EXPORT annotation();
+    print EXPORT amg();
+
+    close EXPORT;
+    system qq{bash $sh};
+}
+
+sub pfam {
+
+    my $cmd = qq{tsv-utils bins                            \
+                    -t 1                                   \
+                    -s 2                                   \
+                    -l protein_id                          \
+                    $pfam                                  \
+                |cut -f1,3                                 \
+                |tail -n +2                                \
+                |tsv-utils add_headline                    \
+                    \"#protein_id\\tpfam\"                 \
+                    -                                      \
+                >$dbscan/pfam.tsv;\n};
+       $cmd =~ s/\s+\n\s+/ /msg;
+    return $cmd;
+
+}
+
+sub kofam {
+
+    my $cmd = qq{tsv-utils add_headline                    \
+                    \"#protein_id\\tkofam_id\"             \
+                    $kegg                                  \
+                >$dbscan/kegg.tsv;\n};
+       $cmd =~ s/\s+\n\s+/ /msg;
+    return $cmd;
+
+}
+
+sub annotation {
+
+    my $cmd = qq{cut -f1,2 $vann                           \
+                |tsv-utils annotation                      \
+                    -p -                                   \
+                    -c 2                                   \
+                    - $dbscan/label.tsv                    \
+                |tsv-utils annotation                      \
+                    -p -                                   \
+                    -c 4                                   \
+                    $db/description/vog.txt -              \
+                |tsv-utils annotation                      \
+                    -p -                                   \
+                    -c 2                                   \
+                    $dbscan/kegg.tsv  -                    \
+                |tsv-utils annotation                      \
+                    -p -                                   \
+                    -c 6                                   \
+                    $db/description/kegg.txt -             \
+                |tsv-utils annotation                      \
+                    -p -                                   \
+                    -c 2                                   \
+                    $dbscan/pfam.tsv -                     \
+                >$dbscan/annotation.tsv;\n};
+       $cmd =~ s/\s+\n\s+/ /msg;
+    return $cmd;
+
+}
+
+sub amg {
+
+    my $cmd = qq{$binaries/amg-tk label                    \
+                    $db/AMGs_DBxref.txt                    \
+                    $dbscan/annotation.tsv                 \
+                >$report/AMGs.txt;\n};
+       $cmd =~ s/\s+\n\s+/ /msg;
+    return $cmd;
+
+}
+
+sub auxiliary_run {
+
+    my $sh = qq{$runs/auxiliary.sh}; 
+    open (EXPORT, ">$sh") || die "[ERR]: can't open $sh $!\n";
+
+    print EXPORT qq{rm -rf $runs;\n};
+
+    close EXPORT;
+    system qq{bash $sh};
+
+}
+
+
+sub usage {
+
+    printf STDERR qq(
+Program: amg-kit: virus conserve region detection with DBSCAN algrithom. 
+                    (density-based spatial clustering of applications with noise) .
+Version: $version
+Contact: ZHANG LEI <zhanglei\@logicinformatics.com>\n
+Usage:   amg-kit  [options] <bed> <vann> <kegg> <pfam> <project>\n
+Options: -d INT    largest gene number between two virus genes.
+                   DBSCAN cluster radius, default: [5]
+         -r INT    mininal genes number for a defined virus conserve region.
+                   DBSCAN cluster size. default: [5].
+
+);
+   exit;
+
+}
